@@ -8,11 +8,15 @@ dataset.
 '''
 
 # TODO - import required libraries
+from cmath import inf
 from urllib.request import urlretrieve
 from tqdm import tqdm
 from pathlib import Path
 from zipfile import ZipFile
 from subprocess import run
+from collections import Counter
+import spacy
+import ujson as json
 
 
 def _get_filename_from_url(download_url):
@@ -66,15 +70,132 @@ def download(download_url_list, output_dir):
     return None
 
 
-def pre_process(output_dir):
-    # TODO - 
+def _word_tokenizer(text):
+    tokens = nlp(text)
+    # TODO - Experiment with using lemma instead of exact word
+    # To do this, you will need to load english language pipeline
+    # instead of simple language model (which only performs tokenization)
+    return [token.text for token in tokens]
+
+
+def _convert_token_to_span(text, tokens):
+    ptr = 0
+    spans = []
+    for token in tokens:
+        ptr = text.find(token, ptr)
+        if ptr < 0:
+            raise Exception(f'token {token} not found in {text}')
+        spans.append((ptr, ptr+len(token)))
+        ptr += len(token)
+    return spans
+
+
+def _process_file(file, dataset_type, word_counter, char_counter):
+    print(f"Pre-processing {dataset_type} examples...")
+    with open(file, 'r') as f:
+        source = json.load(f)
+
+    examples = []
+    # use this to store exact question, context and answer texts
+    # This can come in handy when debugging. The key is the question
+    # ID in the processed dataset and value is the dict of context,
+    # question, answer and uuid
+    eval_examples = {}
+    total = 0
+    for document in tqdm(source['data']):
+        for para in document['paragraphs']:
+            context_text = para['context'].replace(
+                "''",'" ').replace("``",'" ')
+            context_tokens = _word_tokenizer(context_text)
+            context_chars = [list(token) for token in context_tokens]
+            token_spans = _convert_token_to_span(context_text, context_tokens)
+
+            if dataset_type == 'train':
+                for tk in context_tokens:
+                    word_counter[tk] += len(para['qas'])
+                    for ch in tk:
+                        char_counter[ch] += len(para['ques'])
+
+            for ques in para['qas']:
+                total += 1
+                ques_text = ques['question'].replace(
+                    "''",'" ').replace("``",'" ')
+                ques_tokens = _word_tokenizer(ques_text)
+                ques_chars = [list(token) for token in ques_tokens]
+
+                if dataset_type == 'train':
+                    for tk in ques_tokens:
+                        word_counter[tk] += 1
+                        for ch in ques_chars:
+                            char_counter[ch] += 1
+
+                ans_starts = []
+                ans_ends = []
+                ans_texts = []    
+                for ans in ques['answers']:
+                    ans_text = ans['text']
+                    ans_start = ans['answer_start']
+                    ans_end = ans_start + len(ans_text)
+
+                    ans_tk_start = len(context_tokens) + 1
+                    ans_tk_end = -1
+                    for i, span in enumerate(token_spans):
+                        if not (ans_end <= span[0] or ans_start >= span[1]):
+                            ans_tk_start = min(ans_tk_start, i)
+                            ans_tk_end = max(ans_tk_end, i)
+                    
+                    if ans_tk_start > ans_tk_end:
+                        raise Exception(f'answer for {ques["id"]} does not exist within context')
+
+                    ans_starts.append(ans_start)
+                    ans_ends.append(ans_end)
+                    ans_texts.append(ans_text)
+
+                example = {'context_tokens': context_tokens,
+                           'context_chars': context_chars,
+                           'ques_tokens': ques_tokens,
+                           'ques_chars': ques_chars,
+                           'ans_starts': ans_starts,
+                           'ans_ends': ans_ends,
+                           'id': total
+                           }
+                exact_example = {'context': context_text,
+                                 'question': ques_text,
+                                 'answer': ans_texts,
+                                 'uuid': ques['id']
+                                 }
+                examples.append(example)
+                eval_examples[str(total)] = exact_example
+
+    return examples, eval_examples
+
+
+def pre_process(data_dir):
+    # TODO - initialize word and char Counter
+    word_counter = Counter()
+    char_counter = Counter()
+    # TODO - process train file into tokens and question-answer
+    train_file = str(data_dir/'train-v2.0.json')
+    train_examples, train_eval_examples = _process_file(train_file, 'train', word_counter, char_counter)
+    # TODO - get word2Ind and ind2Word
+    # TODO - get char2Ind and ind2Char
+    # TODO - load word embeddings
+    # TODO - load char embeddings
+
     pass
 
 
 if __name__=='__main__':
-    
-    # TODO - download SQuAD and GLoVe
+    download_urls = [('GLoVe 300D', 'https://nlp.stanford.edu/data/glove.840B.300d.zip'),
+                     ('SQuAD 2.0 train set', 'https://rajpurkar.github.io/SQuAD-explorer/dataset/train-v2.0.json'),
+                     ('SQuAD 2.0 dev set', 'https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json')
+                    ]
+    data_dir = Path('./data')
 
+    download(download_urls, data_dir)
+
+    # load spacy english language model
+    nlp = spacy.blank('en')
     # TODO - preprocess and save SQuAD and GLoVe
 
     pass
