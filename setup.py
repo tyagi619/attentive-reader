@@ -8,7 +8,7 @@ dataset.
 '''
 
 # TODO - import required libraries
-from cmath import inf
+from cmath import inf, sqrt
 from urllib.request import urlretrieve
 from tqdm import tqdm
 from pathlib import Path
@@ -17,6 +17,8 @@ from subprocess import run
 from collections import Counter
 import spacy
 import ujson as json
+
+import numpy as np
 
 
 def _get_filename_from_url(download_url):
@@ -88,6 +90,41 @@ def _convert_token_to_span(text, tokens):
         spans.append((ptr, ptr+len(token)))
         ptr += len(token)
     return spans
+
+
+def _get_embedding(counter, emb_type, emb_file, vec_size, limit=-1):
+    assert vec_size is not None, 'Embedding vector size cannot be None'
+
+    embedding_dict = {}
+    if emb_file is not None:
+        with open(emb_file, 'r') as f:
+            line = f.readline()
+            arr = line.split()
+            token = ''.join(arr[:-vec_size])
+            embed_vec = list(map(float, arr[-vec_size:]))
+            if token in counter and counter[token] > limit:
+                embedding_dict[token] = embed_vec
+    else:
+        for token, count in counter.items():
+            if count > limit:
+                # Initialize the parameters as std = sqrt(2/in_features)
+                # This is the standard initialization so that std does not
+                # increase or decrease too much when propagated across
+                # layers
+                embedding_dict[token] = np.random.normal(scale=sqrt(2)/sqrt(vec_size),
+                                                         size=(vec_size,)).tolist() 
+
+    print(f"{len(embedding_dict)} tokens have corresponding {emb_type} embedding vector")
+
+    token2idx = {token: idx for idx, token in enumerate(embedding_dict.keys(),2)}
+    NULL = '--NULL--'
+    OOV = '--OOV--'
+    token2idx[NULL] = 0
+    token2idx[OOV] = 1
+    embedding_dict[NULL] = [0. for _ in range(vec_size)]
+    embedding_dict[OOV] = [0. for _ in range(vec_size)]
+    emb_mat = [embedding_dict[token2idx[idx]] for idx in range(len(token2idx))]
+    return emb_mat, token2idx
 
 
 def _process_file(file, dataset_type, word_counter, char_counter):
