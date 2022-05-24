@@ -77,7 +77,7 @@ def _word_tokenizer(text):
     # TODO - Experiment with using lemma instead of exact word
     # To do this, you will need to load english language pipeline
     # instead of simple language model (which only performs tokenization)
-    return [token.text for token in tokens]
+    return [token.text.lower().strip() for token in tokens]
 
 
 def _convert_token_to_span(text, tokens):
@@ -92,6 +92,110 @@ def _convert_token_to_span(text, tokens):
     return spans
 
 
+def _build_features(out_file, examples, dataset_type, word2idx, char2idx, is_test=False):
+    # In the model, (batch_size, seq_len) is the effective
+    # batch size. Thus, all sequences must have same length 
+    # with a given dataset type. Across different dataset 
+    # type, the seq_len can vary though.
+    para_limit = 1000 if is_test else 400
+    ques_limit = 100 if is_test else 50
+    ans_limit = 30
+    char_limit = 16 
+
+    def is_answerable(ex):
+        return len(ex['y1s']) > 0 and len(ex['y2s']) > 0
+
+    def drop_example(ex):
+        if is_test:
+            drop = False
+        else:
+            drop = len(ex['context_tokens']) > para_limit or \
+                   len(ex['ques_tokens']) > ques_limit or \
+                   (is_answerable(ex) and
+                   ex['y2s'][-1] - ex['y1s'][-1] > ans_limit)
+        return drop
+
+    def _get_word_idx(word):
+        if word in word2idx:
+            return word2idx[word]
+        # return OOV if word is not found
+        return 1
+
+    def _get_char_idx(char):
+        if char in char2idx:
+            return char2idx[char]
+        # return OOV if char is not found
+        return 1    
+
+    total_ = 0
+    total = 0
+    context_idxs = []
+    context_char_idxs = []
+    ques_idxs = []
+    ques_char_idxs = []
+    y1s = []
+    y2s = []
+    ids = []
+
+    print(f"Converting {dataset_type} examples to indices...")
+
+    for example in tqdm(examples):
+        total_ += 1
+
+        if drop_example(example):
+            continue
+
+        total += 1
+        
+        context_idx = np.zeros(para_limit, dtype=np.int32)
+        context_char_idx = np.zeros(char_limit, dtype=np.int32)
+        ques_idx = np.zeros(ques_limit, dtype=np.int32)
+        ques_char_idx = np.zeros(char_limit, dtype=np.int32)
+
+        for i,token in enumerate(example['context_tokens']):
+            context_idx[i] = _get_word_idx(token)
+        context_idxs.append(context_idx)
+
+        for i, token in enumerate(example['ques_tokens']):
+            ques_idx[i] = _get_word_idx(token)
+        ques_idxs.append(ques_idx)
+
+        for i, token in enumerate(example['context_chars']):
+            for j, char in enumerate(token):
+                if j >= char_limit:
+                    break
+                context_char_idx[j] = _get_char_idx(char)
+        context_char_idxs.append(context_char_idx)
+
+        for i, token in enumerate(example['ques_chars']):
+            for j, char in enumerate(token):
+                if j >= char_limit:
+                    break
+                ques_char_idx[j] = _get_char_idx(char)
+        ques_char_idxs.append(ques_char_idx)
+
+        if is_answerable(example):
+            start, end = example['y1s'][-1], example['y2s'][-1]
+        else:
+            start, end = -1, -1
+
+        y1s.append(start)
+        y2s.append(end)
+        ids.append(example['id'])
+
+    np.savez(out_file,
+             context_idxs=np.array(context_idxs),
+             context_char_idxs=np.array(context_char_idxs),
+             ques_idxs=np.array(ques_idxs),
+             ques_char_idxs=np.array(ques_char_idxs),
+             y1s=np.array(y1s),
+             y2s=np.array(y2s),
+             ids=np.array(ids))
+    print(f"Built {total} / {total_} instances of features in total")
+    meta = {'total': total}
+    return meta
+
+
 def _get_embedding(counter, emb_type, emb_file, vec_size, limit=-1):
     assert vec_size is not None, 'Embedding vector size cannot be None'
 
@@ -100,7 +204,7 @@ def _get_embedding(counter, emb_type, emb_file, vec_size, limit=-1):
         with open(emb_file, 'r') as f:
             line = f.readline()
             arr = line.split()
-            token = ''.join(arr[:-vec_size])
+            token = ''.join(arr[:-vec_size]).lower().strip()
             embed_vec = list(map(float, arr[-vec_size:]))
             if token in counter and counter[token] > limit:
                 embedding_dict[token] = embed_vec
@@ -117,13 +221,16 @@ def _get_embedding(counter, emb_type, emb_file, vec_size, limit=-1):
     print(f"{len(embedding_dict)} tokens have corresponding {emb_type} embedding vector")
 
     token2idx = {token: idx for idx, token in enumerate(embedding_dict.keys(),2)}
+
     NULL = '--NULL--'
     OOV = '--OOV--'
     token2idx[NULL] = 0
     token2idx[OOV] = 1
     embedding_dict[NULL] = [0. for _ in range(vec_size)]
     embedding_dict[OOV] = [0. for _ in range(vec_size)]
+
     emb_mat = [embedding_dict[token2idx[idx]] for idx in range(len(token2idx))]
+
     return emb_mat, token2idx
 
 
@@ -192,8 +299,8 @@ def _process_file(file, dataset_type, word_counter, char_counter):
                            'context_chars': context_chars,
                            'ques_tokens': ques_tokens,
                            'ques_chars': ques_chars,
-                           'ans_starts': ans_starts,
-                           'ans_ends': ans_ends,
+                           'y1s': ans_starts,
+                           'y2s': ans_ends,
                            'id': total
                            }
                 exact_example = {'context': context_text,
@@ -214,9 +321,16 @@ def pre_process(data_dir):
     # TODO - process train file into tokens and question-answer
     train_file = str(data_dir/'train-v2.0.json')
     train_examples, train_eval_examples = _process_file(train_file, 'train', word_counter, char_counter)
-    # TODO - get word2Ind and ind2Word
-    # TODO - get char2Ind and ind2Char
-    # TODO - load word embeddings
+    # TODO - load word embeddings and word2idx
+    glove_file = str(data_dir/'glove.840B.300d'/'glove.840B.300d.txt')
+    word_emb_mat, word2idx = _get_embedding(word_counter, 'word',
+                                            emb_file=glove_file,
+                                            vec_size=300)
+    # TODO - load char embeddings and char2idx
+    char_emb_mat, char2idx = _get_embedding(char_counter, 'char',
+                                            emb_file=None,
+                                            vec_size=64)
+    # TODO - process SQuAD dataset into indexes
     # TODO - load char embeddings
 
     pass
