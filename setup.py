@@ -279,8 +279,8 @@ def _process_file(file, dataset_type, word_counter, char_counter):
                     if ans_tk_start > ans_tk_end:
                         raise Exception(f'answer for {ques["id"]} does not exist within context')
 
-                    ans_starts.append(ans_start)
-                    ans_ends.append(ans_end)
+                    ans_starts.append(ans_tk_start)
+                    ans_ends.append(ans_tk_end)
                     ans_texts.append(ans_text)
 
                 example = {'context_tokens': context_tokens,
