@@ -8,7 +8,7 @@ dataset.
 '''
 
 # TODO - import required libraries
-from cmath import inf, sqrt
+from math import sqrt
 from urllib.request import urlretrieve
 from tqdm import tqdm
 from pathlib import Path
@@ -48,27 +48,11 @@ def _download(download_url, save_path):
     return None
 
 
-def download(download_url_list, output_dir):
-    for name, download_url in download_url_list:
-        filename = _get_filename_from_url(download_url)
-        filePath = output_dir/filename
-
-        if not filePath.exists():
-            print(f'Downloading {name}...')
-            _download(filePath, str(filePath))
-
-        if filePath.exists() and (filePath.suffix=='.zip'):
-            extracted_filename = filename.replace('.zip','')
-            extracted_filePath = output_dir/extracted_filename
-            if not extracted_filePath.exists():
-                print(f'Extracting {filename}...')
-                with ZipFile(str(filePath)) as zip_file:
-                    zip_file.extractall(str(extracted_filePath))
-
-    # download spacy english language model (only tokenizer is required)
-    print(f'Download English language model for spacy...')
-    run(['python3','-m','spacy','download','en'])
-
+def _save(obj, filename, message=None):
+    if message is not None:
+        print(f'Saving {message}...')
+    with open(filename, "w") as f:
+        json.dump(obj, f)
     return None
 
 
@@ -83,6 +67,8 @@ def _word_tokenizer(text):
 def _convert_token_to_span(text, tokens):
     ptr = 0
     spans = []
+    # lowercase the text, since case does not change the meaning
+    text = text.lower()
     for token in tokens:
         ptr = text.find(token, ptr)
         if ptr < 0:
@@ -201,13 +187,14 @@ def _get_embedding(counter, emb_type, emb_file, vec_size, limit=-1):
 
     embedding_dict = {}
     if emb_file is not None:
+        print(f'Reading embedding file {emb_file}...')
         with open(emb_file, 'r') as f:
-            line = f.readline()
-            arr = line.split()
-            token = ''.join(arr[:-vec_size]).lower().strip()
-            embed_vec = list(map(float, arr[-vec_size:]))
-            if token in counter and counter[token] > limit:
-                embedding_dict[token] = embed_vec
+            while line := f.readline():
+                arr = line.split()
+                token = ''.join(arr[:-vec_size]).lower().strip()
+                embed_vec = list(map(float, arr[-vec_size:]))
+                if token in counter and counter[token] > limit:
+                    embedding_dict[token] = embed_vec
     else:
         for token, count in counter.items():
             if count > limit:
@@ -215,7 +202,7 @@ def _get_embedding(counter, emb_type, emb_file, vec_size, limit=-1):
                 # This is the standard initialization so that std does not
                 # increase or decrease too much when propagated across
                 # layers
-                embedding_dict[token] = np.random.normal(scale=sqrt(2)/sqrt(vec_size),
+                embedding_dict[token] = np.random.normal(scale=sqrt(2/vec_size),
                                                          size=(vec_size,)).tolist() 
 
     print(f"{len(embedding_dict)} tokens have corresponding {emb_type} embedding vector")
@@ -229,7 +216,8 @@ def _get_embedding(counter, emb_type, emb_file, vec_size, limit=-1):
     embedding_dict[NULL] = [0. for _ in range(vec_size)]
     embedding_dict[OOV] = [0. for _ in range(vec_size)]
 
-    emb_mat = [embedding_dict[token2idx[idx]] for idx in range(len(token2idx))]
+    idx2emb = {idx:embedding_dict[token] for token, idx in token2idx.items()}
+    emb_mat = [idx2emb[idx] for idx in range(len(idx2emb))]
 
     return emb_mat, token2idx
 
@@ -258,7 +246,7 @@ def _process_file(file, dataset_type, word_counter, char_counter):
                 for tk in context_tokens:
                     word_counter[tk] += len(para['qas'])
                     for ch in tk:
-                        char_counter[ch] += len(para['ques'])
+                        char_counter[ch] += len(para['qas'])
 
             for ques in para['qas']:
                 total += 1
@@ -270,7 +258,7 @@ def _process_file(file, dataset_type, word_counter, char_counter):
                 if dataset_type == 'train':
                     for tk in ques_tokens:
                         word_counter[tk] += 1
-                        for ch in ques_chars:
+                        for ch in tk:
                             char_counter[ch] += 1
 
                 ans_starts = []
@@ -310,30 +298,83 @@ def _process_file(file, dataset_type, word_counter, char_counter):
                                  }
                 examples.append(example)
                 eval_examples[str(total)] = exact_example
-
+    
+    print(f"{len(examples)} questions in total")
     return examples, eval_examples
 
 
 def pre_process(data_dir):
-    # TODO - initialize word and char Counter
     word_counter = Counter()
     char_counter = Counter()
-    # TODO - process train file into tokens and question-answer
+
     train_file = str(data_dir/'train-v2.0.json')
-    train_examples, train_eval_examples = _process_file(train_file, 'train', word_counter, char_counter)
-    # TODO - load word embeddings and word2idx
+    train_examples, train_eval_examples = _process_file(train_file,
+                                                        'train',
+                                                        word_counter,
+                                                        char_counter)
+
+    dev_file = str(data_dir/'dev-v2.0.json')
+    dev_examples, dev_eval_examples = _process_file(dev_file,
+                                                    'dev',
+                                                    word_counter=None,
+                                                    char_counter=None)
+
     glove_file = str(data_dir/'glove.840B.300d'/'glove.840B.300d.txt')
     word_emb_mat, word2idx = _get_embedding(word_counter, 'word',
                                             emb_file=glove_file,
                                             vec_size=300)
-    # TODO - load char embeddings and char2idx
+
     char_emb_mat, char2idx = _get_embedding(char_counter, 'char',
                                             emb_file=None,
                                             vec_size=64)
-    # TODO - process SQuAD dataset into indexes
-    # TODO - load char embeddings
 
-    pass
+    train_out_file = str(data_dir/'train.npz')
+    _build_features(train_out_file, train_examples, 'train', word2idx, char2idx)
+
+    dev_out_file = str(data_dir/'dev.npz')
+    _build_features(dev_out_file, dev_examples, 'dev', word2idx, char2idx)
+
+    word_emb_file = str(data_dir/'word_emb.json')
+    _save(word_emb_mat, word_emb_file, message="word embeddings")
+
+    char_emb_file = str(data_dir/'char_emb.json')
+    _save(char_emb_mat, char_emb_file, message="char embeddings")
+
+    train_eval_file = str(data_dir/'train_eval.json')
+    _save(train_eval_examples, train_eval_file, message="train eval")
+
+    dev_eval_file = str(data_dir/'dev_eval.json')
+    _save(dev_eval_examples, dev_eval_file, message="dev eval")
+
+    word2idx_file = str(data_dir/'word2idx.json')
+    _save(word2idx, word2idx_file, message="word dictionary")
+
+    char2idx_file = str(data_dir/'char2idx.json')
+    _save(char2idx, char2idx_file, message="char dictionary")
+    return None
+
+
+def download(download_url_list, output_dir):
+    for name, download_url in download_url_list:
+        filename = _get_filename_from_url(download_url)
+        filePath = output_dir/filename
+
+        if not filePath.exists():
+            print(f'Downloading {name}...')
+            _download(filePath, str(filePath))
+
+        if filePath.exists() and (filePath.suffix=='.zip'):
+            extracted_filename = filename.replace('.zip','')
+            extracted_filePath = output_dir/extracted_filename
+            if not extracted_filePath.exists():
+                print(f'Extracting {filename}...')
+                with ZipFile(str(filePath)) as zip_file:
+                    zip_file.extractall(str(extracted_filePath))
+
+    # download spacy english language model (only tokenizer is required)
+    print(f'Download English language model for spacy...')
+    run(['python3','-m','spacy','download','en'])
+    return None
 
 
 if __name__=='__main__':
@@ -343,10 +384,9 @@ if __name__=='__main__':
                     ]
     data_dir = Path('./data')
 
-    download(download_urls, data_dir)
+    # download(download_urls, data_dir)
 
     # load spacy english language model
     nlp = spacy.blank('en')
-    # TODO - preprocess and save SQuAD and GLoVe
 
-    pass
+    pre_process(data_dir)
