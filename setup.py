@@ -303,7 +303,7 @@ def _process_file(file, dataset_type, word_counter, char_counter):
     return examples, eval_examples
 
 
-def pre_process(data_dir):
+def pre_process(data_dir, process_test=False):
     word_counter = Counter()
     char_counter = Counter()
 
@@ -333,6 +333,19 @@ def pre_process(data_dir):
 
     dev_out_file = str(data_dir/'dev.npz')
     _build_features(dev_out_file, dev_examples, 'dev', word2idx, char2idx)
+
+    if process_test:
+        test_file = str(data_dir/'test-v2.0.json')
+        test_examples, test_eval_examples = _process_file(test_file,
+                                                          'test',
+                                                          word_counter=None,
+                                                          char_counter=None)
+
+        test_out_file = str(data_dir/'test.npz')
+        _build_features(test_out_file, test_examples, 'test', word2idx, char2idx)
+
+        test_eval_file = str(data_dir/'test_eval.json')
+        _save(test_eval_examples, test_eval_file, message='test eval')
 
     word_emb_file = str(data_dir/'word_emb.json')
     _save(word_emb_mat, word_emb_file, message="word embeddings")
