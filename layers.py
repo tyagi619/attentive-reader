@@ -11,6 +11,7 @@ model for question answering.
 import torch
 import torch.nn  as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 class Highway(nn.Module):
@@ -66,11 +67,11 @@ class WordEmbedding(nn.Module):
 
     def forward(self, x):
         embed = self.embed(x)
-        h_proj = self.proj(embed)
-        h_embed = self.highway(h_proj)
-        h_embed = F.dropout(input=h_embed, p=self.drop_prob, 
+        x_proj = self.proj(embed)
+        x_embed = self.highway(x_proj)
+        x_embed = F.dropout(input=x_embed, p=self.drop_prob, 
                            training=self.training, inplace=False)
-        return h_embed
+        return x_embed
 
 
 class CharEmbedding(nn.Module):
@@ -87,23 +88,37 @@ class CharEmbedding(nn.Module):
         self.highway = Highway(num_highway_layers, e_word)
 
     def forward(self, x):
-        x_embed = self.embed(x)
-        x_reshaped = x_embed.reshape(x_embed.size(0)*x_embed.size(1),
-                                     x_embed.size(3), x_embed.size(2))
+        embed = self.embed(x)
+        x_reshaped = embed.reshape(embed.size(0)*embed.size(1),
+                                   embed.size(3), embed.size(2))
         x_conv = self.cnn(x_reshaped)
         x_conv = x_conv.reshape(x.size(0), x.size(1), x_conv.size(1))
-        x_out = self.highway(x_conv)
-        x_out = F.dropout(input=x_out, p=self.drop_prob,
+        x_embed = self.highway(x_conv)
+        x_embed = F.dropout(input=x_embed, p=self.drop_prob,
                           training=self.training, inplace=False)
-        return x_out
+        return x_embed
 
 
 class RNNEncoder(nn.Module):
-    def __init__(self):
-        pass
+    def __init__(self, e_word, hidden_size, num_layers, drop_prob=0.):
+        super(RNNEncoder, self).__init__()
+        self.drop_prob = drop_prob
 
-    def forward(self):
-        pass
+        self.lstm = nn.LSTM(input_size=e_word, hidden_size=hidden_size,
+                            num_layers=num_layers, bias=True,
+                            batch_first=True, bidirectional=True,
+                            dropout=drop_prob)
+
+    def forward(self, x, lengths):
+        orig_len = x.size(1)
+        x_packed = pack_padded_sequence(input=x, lengths=lengths,
+                                        batch_first=True,
+                                        enforce_sorted=False)
+        x_lstm = self.lstm(x_packed)
+        x_out = pad_packed_sequence(sequence=x_lstm, batch_first=True,
+                                    total_length=orig_len)
+        x_out = F.dropout(input=x, p=self.drop_prob, training=self.training)
+        return x_out
 
 
 class BiDAFAttention(nn.Module):
