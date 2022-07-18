@@ -100,11 +100,12 @@ class CharEmbedding(nn.Module):
 
 
 class RNNEncoder(nn.Module):
-    def __init__(self, e_word, hidden_size, num_layers, drop_prob=0.):
+    def __init__(self, input_size, hidden_size, num_layers, drop_prob=0.):
         super(RNNEncoder, self).__init__()
         self.drop_prob = drop_prob
 
-        self.lstm = nn.LSTM(input_size=e_word, hidden_size=hidden_size,
+        self.lstm = nn.LSTM(input_size=input_size,
+                            hidden_size=hidden_size,
                             num_layers=num_layers, bias=True,
                             batch_first=True, bidirectional=True,
                             dropout=drop_prob)
@@ -122,16 +123,96 @@ class RNNEncoder(nn.Module):
 
 
 class BiDAFAttention(nn.Module):
-    def __init__(self):
-        pass
+    def __init__(self, hidden_size, drop_prob):
+        super(BiDAFAttention, self).__init__()
+        self.drop_prob = drop_prob
 
-    def forward(self):
-        pass
+        self.bias = nn.Parameter(torch.zeros(1))
+        self.c_weight = nn.Parameter(torch.zeros(hidden_size, 1))
+        self.q_weight = nn.Parameter(torch.zeros(hidden_size, 1))
+        self.cq_weight = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        for weight in (self.c_weight, self.q_weight, self.cq_weight):
+            nn.init.kaiming_normal_(weight)
+
+    def forward(self, c, q, c_mask, q_mask):
+        # c - (batch_size, c_len, hidden_size)
+        # q - (batch_size, q_len, hidden_size)
+        batch_size, c_len, _ = c.size()
+        q_len = q.size(1)
+
+        s = self.get_similarity_matrix(c, q)
+        c_mask = c_mask.view((batch_size, c_len, 1))
+        q_mask = q_mask.view((batch_size, 1, q_len))
+
+        s1 = BiDAFAttention.masked_softmax(s, q_mask, dim=2)
+        s2 = BiDAFAttention.masked_softmax(s, c_mask, dim=1)
+
+        # torch.matmul is a general function to multiply 2 tensor
+        # torch.bmm multiplies 2 3-dimensional matrices only. In
+        # the below scenario, we can equivalently use torch.matmul
+        # instead of torch.bmm and should get the same results
+        a = torch.bmm(s1, q)
+        b = torch.bmm(torch.bmm(s1, s2.transpose(1, 2)), c)
+        x = torch.cat((c, a, c*a, c*b), dim=2)
+        return x
+
+    def get_similarity_matrix(self, c, q):
+        c_len = c.size(1)
+        q_len = q.size(1)
+
+        c = F.dropout(c, p=self.drop_prob, training=self.training)
+        q = F.dropout(q, p=self.drop_prob, training=self.training)
+
+        sim_c = torch.matmul(c, self.c_weight).expand(-1, -1, q_len)
+        sim_q = torch.matmul(q, self.q_weight).transpose(1, 2).expand(-1, c_len, -1)
+        sim_cq = torch.matmul(c * self.cq_weight, q.transpose(1, 2))
+        s = sim_c + sim_q + sim_cq + self.bias
+        return s
+    
+    @staticmethod
+    def masked_softmax(s, mask, dim=-1):
+        mask = mask.type(torch.float32)
+        masked_s = mask * s + (1-mask) * -1e30
+        probs = F.softmax(masked_s, dim=dim)
+        return probs
 
 
 class BiDAFOutput(nn.Module):
-    def __init__(self):
-        pass
+    def __init__(self, hidden_size, drop_prob):
+        super(BiDAFOutput, self).__init__()
+        self.drop_prob = drop_prob
 
-    def forward(self):
-        pass
+        self.rnn = RNNEncoder(input_size=2*hidden_size,
+                               hidden_size=hidden_size,
+                               num_layers=1, drop_prob=drop_prob)
+
+        self.att_linear_1 = nn.Linear(in_features=8*hidden_size,
+                                      out_features=1, bias=True)
+        self.mod_linear_1 = nn.Linear(in_features=2*hidden_size,
+                                      out_features=1, bias=True)
+        
+        self.att_linear_2 = nn.Linear(in_features=8*hidden_size,
+                                      out_features=1, bias=True)
+        self.mod_linear_2 = nn.Linear(in_features=2*hidden_size,
+                                      out_features=1, bias=True)
+
+    def forward(self, att, mod, mask):
+        p_start = self.att_linear_1(att) + self.mod_linear_1(mod)
+
+        lengths = mask.sum(-1)
+        mod_2 = self.rnn(mod, lengths)
+        p_end = self.att_linear_2(att) + self.mod_linear_2(mod_2)
+
+        log_p_start = BiDAFOutput.masked_log_softmax(p_start.squeeze(),
+                                                     mask, dim=-1)
+        log_p_end = BiDAFOutput.masked_log_softmax(p_end.squeeze(), mask,
+                                                   dim=-1)
+
+        return log_p_start, log_p_end
+
+    @staticmethod
+    def masked_log_softmax(s, mask, dim=-1):
+        mask = mask.type(torch.float32)
+        masked_s = mask * s + (1-mask) * -1e30
+        probs = F.log_softmax(masked_s, dim=dim)
+        return probs
