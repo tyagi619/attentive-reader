@@ -17,20 +17,24 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 class Highway(nn.Module):
     def __init__(self, num_layers, hidden_size):
         super(Highway, self).__init__()
-        self.gate = [nn.Linear(in_features=hidden_size,
-                              out_features=hidden_size,
-                              bias=True)
-                     for _ in range(num_layers)]
-        self.transform = [nn.Linear(in_features=hidden_size,
+        # nn.ModuleList can be indexed similar to python list but
+        # with ModuleList all the modules within the list are properly
+        # registered and thus accessable via module methods and 
+        # attributes (.prameters() and named_parameters())
+        self.transform = nn.ModuleList([nn.Linear(in_features=hidden_size,
+                                        out_features=hidden_size,
+                                        bias=True)
+                                        for _ in range(num_layers)])
+        self.gate = nn.ModuleList([nn.Linear(in_features=hidden_size,
                                    out_features=hidden_size,
                                    bias=True)
-                          for _ in range(num_layers)]
+                                   for _ in range(num_layers)])
 
     def forward(self, x):
         for gate, transform in zip(self.gate, self.transform):
-            g = F.sigmoid(gate(x))
+            g = torch.sigmoid(gate(x))
             t = F.relu(transform(x))
-            x = g*t + (1-g)*t
+            x = g*t + (1-g)*x
         return x
 
 
@@ -53,24 +57,23 @@ class CNN(nn.Module):
 
 
 class WordEmbedding(nn.Module):
-    def __init__(self, word_vectors, num_highway_layers, hidden_size, drop_prob):
+    def __init__(self, word_vectors, n_highway_layers, hidden_size, drop_prob):
         super(WordEmbedding, self).__init__()
         self.drop_prob = drop_prob
         self.embed = nn.Embedding.from_pretrained(embeddings=word_vectors,
                                                     freeze=True,
-                                                    padding_idx=0,
                                                     scale_grad_by_freq=False)
         self.proj = nn.Linear(in_features=word_vectors.size(1),
                               out_features=hidden_size,
                               bias=False)
-        self.highway = Highway(num_highway_layers, hidden_size)
+        self.highway = Highway(n_highway_layers, hidden_size)
 
     def forward(self, x):
         embed = self.embed(x)
+        embed = F.dropout(input=embed, p=self.drop_prob, 
+                           training=self.training)
         x_proj = self.proj(embed)
         x_embed = self.highway(x_proj)
-        x_embed = F.dropout(input=x_embed, p=self.drop_prob, 
-                           training=self.training, inplace=False)
         return x_embed
 
 
@@ -106,19 +109,19 @@ class RNNEncoder(nn.Module):
 
         self.lstm = nn.LSTM(input_size=input_size,
                             hidden_size=hidden_size,
-                            num_layers=num_layers, bias=True,
+                            num_layers=num_layers,
                             batch_first=True, bidirectional=True,
-                            dropout=drop_prob)
+                            dropout=drop_prob if num_layers > 1 else 0.0)
 
     def forward(self, x, lengths):
         orig_len = x.size(1)
         x_packed = pack_padded_sequence(input=x, lengths=lengths,
                                         batch_first=True,
                                         enforce_sorted=False)
-        x_lstm = self.lstm(x_packed)
-        x_out = pad_packed_sequence(sequence=x_lstm, batch_first=True,
+        x_lstm, _ = self.lstm(x_packed)
+        x_out, _ = pad_packed_sequence(sequence=x_lstm, batch_first=True,
                                     total_length=orig_len)
-        x_out = F.dropout(input=x, p=self.drop_prob, training=self.training)
+        x_out = F.dropout(input=x_out, p=self.drop_prob, training=self.training)
         return x_out
 
 
@@ -127,12 +130,16 @@ class BiDAFAttention(nn.Module):
         super(BiDAFAttention, self).__init__()
         self.drop_prob = drop_prob
 
-        self.bias = nn.Parameter(torch.zeros(1))
         self.c_weight = nn.Parameter(torch.zeros(hidden_size, 1))
         self.q_weight = nn.Parameter(torch.zeros(hidden_size, 1))
         self.cq_weight = nn.Parameter(torch.zeros(1, 1, hidden_size))
         for weight in (self.c_weight, self.q_weight, self.cq_weight):
-            nn.init.kaiming_normal_(weight)
+            # The choice of initial function is crucial. Using kaimang_normal_
+            # instead of xavier_uniform_ will produce much worse results (F1 ~52
+            # compared to 60 in latter case).
+            # nn.init.kaiming_uniform_(weight)
+            nn.init.xavier_uniform_(weight)
+        self.bias = nn.Parameter(torch.zeros(1))
 
     def forward(self, c, q, c_mask, q_mask):
         # c - (batch_size, c_len, hidden_size)
@@ -163,8 +170,8 @@ class BiDAFAttention(nn.Module):
         c = F.dropout(c, p=self.drop_prob, training=self.training)
         q = F.dropout(q, p=self.drop_prob, training=self.training)
 
-        sim_c = torch.matmul(c, self.c_weight).expand(-1, -1, q_len)
-        sim_q = torch.matmul(q, self.q_weight).transpose(1, 2).expand(-1, c_len, -1)
+        sim_c = torch.matmul(c, self.c_weight).expand((-1, -1, q_len))
+        sim_q = torch.matmul(q, self.q_weight).transpose(1, 2).expand((-1, c_len, -1))
         sim_cq = torch.matmul(c * self.cq_weight, q.transpose(1, 2))
         s = sim_c + sim_q + sim_cq + self.bias
         return s
@@ -182,15 +189,15 @@ class BiDAFOutput(nn.Module):
         super(BiDAFOutput, self).__init__()
         self.drop_prob = drop_prob
 
-        self.rnn = RNNEncoder(input_size=2*hidden_size,
-                               hidden_size=hidden_size,
-                               num_layers=1, drop_prob=drop_prob)
-
         self.att_linear_1 = nn.Linear(in_features=8*hidden_size,
                                       out_features=1, bias=True)
         self.mod_linear_1 = nn.Linear(in_features=2*hidden_size,
                                       out_features=1, bias=True)
         
+        self.rnn = RNNEncoder(input_size=2*hidden_size,
+                               hidden_size=hidden_size,
+                               num_layers=1, drop_prob=drop_prob)
+
         self.att_linear_2 = nn.Linear(in_features=8*hidden_size,
                                       out_features=1, bias=True)
         self.mod_linear_2 = nn.Linear(in_features=2*hidden_size,
@@ -199,7 +206,7 @@ class BiDAFOutput(nn.Module):
     def forward(self, att, mod, mask):
         p_start = self.att_linear_1(att) + self.mod_linear_1(mod)
 
-        lengths = mask.sum(-1)
+        lengths = mask.sum(-1).cpu()
         mod_2 = self.rnn(mod, lengths)
         p_end = self.att_linear_2(att) + self.mod_linear_2(mod_2)
 

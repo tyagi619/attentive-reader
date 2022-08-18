@@ -105,13 +105,13 @@ def _build_features(out_file, examples, dataset_type, word2idx, char2idx, is_tes
         if word in word2idx:
             return word2idx[word]
         # return OOV if word is not found
-        return 1
+        return word2idx['--OOV--']
 
     def _get_char_idx(char):
         if char in char2idx:
             return char2idx[char]
         # return OOV if char is not found
-        return 1    
+        return word2idx['--OOV--']    
 
     total_ = 0
     total = 0
@@ -134,9 +134,9 @@ def _build_features(out_file, examples, dataset_type, word2idx, char2idx, is_tes
         total += 1
         
         context_idx = np.zeros(para_limit, dtype=np.int32)
-        context_char_idx = np.zeros(char_limit, dtype=np.int32)
+        context_char_idx = np.zeros((para_limit, char_limit), dtype=np.int32)
         ques_idx = np.zeros(ques_limit, dtype=np.int32)
-        ques_char_idx = np.zeros(char_limit, dtype=np.int32)
+        ques_char_idx = np.zeros((ques_limit, char_limit), dtype=np.int32)
 
         for i,token in enumerate(example['context_tokens']):
             context_idx[i] = _get_word_idx(token)
@@ -150,14 +150,14 @@ def _build_features(out_file, examples, dataset_type, word2idx, char2idx, is_tes
             for j, char in enumerate(token):
                 if j >= char_limit:
                     break
-                context_char_idx[j] = _get_char_idx(char)
+                context_char_idx[i, j] = _get_char_idx(char)
         context_char_idxs.append(context_char_idx)
 
         for i, token in enumerate(example['ques_chars']):
             for j, char in enumerate(token):
                 if j >= char_limit:
                     break
-                ques_char_idx[j] = _get_char_idx(char)
+                ques_char_idx[i, j] = _get_char_idx(char)
         ques_char_idxs.append(ques_char_idx)
 
         if is_answerable(example):
@@ -207,13 +207,16 @@ def _get_embedding(counter, emb_type, emb_file, vec_size, limit=-1):
 
     print(f"{len(embedding_dict)} tokens have corresponding {emb_type} embedding vector")
 
-    token2idx = {token: idx for idx, token in enumerate(embedding_dict.keys(),2)}
+    token2idx = {token: idx for idx, token in enumerate(embedding_dict.keys(),3)}
 
     NULL = '--NULL--'
     OOV = '--OOV--'
+    START = '--START--'
     token2idx[NULL] = 0
-    token2idx[OOV] = 1
+    token2idx[START] = 1
+    token2idx[OOV] = 2
     embedding_dict[NULL] = [0. for _ in range(vec_size)]
+    embedding_dict[START] = [0. for _ in range(vec_size)]
     embedding_dict[OOV] = [0. for _ in range(vec_size)]
 
     idx2emb = {idx:embedding_dict[token] for token, idx in token2idx.items()}
@@ -263,25 +266,26 @@ def _process_file(file, dataset_type, word_counter, char_counter):
 
                 ans_starts = []
                 ans_ends = []
-                ans_texts = []    
-                for ans in ques['answers']:
-                    ans_text = ans['text']
-                    ans_start = ans['answer_start']
-                    ans_end = ans_start + len(ans_text)
+                ans_texts = []
+                if dataset_type != 'test': 
+                    for ans in ques['answers']:
+                        ans_text = ans['text']
+                        ans_start = ans['answer_start']
+                        ans_end = ans_start + len(ans_text)
 
-                    ans_tk_start = len(context_tokens) + 1
-                    ans_tk_end = -1
-                    for i, span in enumerate(token_spans):
-                        if not (ans_end <= span[0] or ans_start >= span[1]):
-                            ans_tk_start = min(ans_tk_start, i)
-                            ans_tk_end = max(ans_tk_end, i)
-                    
-                    if ans_tk_start > ans_tk_end:
-                        raise Exception(f'answer for {ques["id"]} does not exist within context')
+                        ans_tk_start = len(context_tokens) + 1
+                        ans_tk_end = -1
+                        for i, span in enumerate(token_spans):
+                            if not (ans_end <= span[0] or ans_start >= span[1]):
+                                ans_tk_start = min(ans_tk_start, i)
+                                ans_tk_end = max(ans_tk_end, i)
+                        
+                        if ans_tk_start > ans_tk_end:
+                            raise Exception(f'answer for {ques["id"]} does not exist within context')
 
-                    ans_starts.append(ans_tk_start)
-                    ans_ends.append(ans_tk_end)
-                    ans_texts.append(ans_text)
+                        ans_starts.append(ans_tk_start)
+                        ans_ends.append(ans_tk_end)
+                        ans_texts.append(ans_text)
 
                 example = {'context_tokens': context_tokens,
                            'context_chars': context_chars,
@@ -293,6 +297,7 @@ def _process_file(file, dataset_type, word_counter, char_counter):
                            }
                 exact_example = {'context': context_text,
                                  'question': ques_text,
+                                 'spans': token_spans,
                                  'answer': ans_texts,
                                  'uuid': ques['id']
                                  }
@@ -374,7 +379,7 @@ def download(download_url_list, output_dir):
 
         if not filePath.exists():
             print(f'Downloading {name}...')
-            _download(filePath, str(filePath))
+            _download(download_url, str(filePath))
 
         if filePath.exists() and (filePath.suffix=='.zip'):
             extracted_filename = filename.replace('.zip','')
@@ -393,11 +398,11 @@ def download(download_url_list, output_dir):
 if __name__=='__main__':
     download_urls = [('GLoVe 300D', 'https://nlp.stanford.edu/data/glove.840B.300d.zip'),
                      ('SQuAD 2.0 train set', 'https://rajpurkar.github.io/SQuAD-explorer/dataset/train-v2.0.json'),
-                     ('SQuAD 2.0 dev set', 'https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json')
+                     ('SQuAD 2.0 dev set', 'https://rajpurkar.github.io/SQuAD-explorer/dataset/dev-v2.0.json'),
                     ]
     data_dir = Path('./data')
 
-    # download(download_urls, data_dir)
+    download(download_urls, data_dir)
 
     # load spacy english language model
     nlp = spacy.blank('en')
