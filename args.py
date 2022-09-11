@@ -60,6 +60,30 @@ def get_train_args():
     return args
 
 
+def get_test_args():
+    parser = argparse.ArgumentParser('Test a trained model on SQuAD')
+
+    add_common_args(parser)
+    add_train_test_args(parser)
+
+    parser.add_argument('--split',
+                        type=str,
+                        default='dev',
+                        choices=('train', 'dev', 'test'),
+                        help='Split to use for testing.')
+    parser.add_argument('--sub_file',
+                        type=str,
+                        default='submission.csv',
+                        help='Name for submission file.')
+
+    # Require load_path for test.py
+    args = parser.parse_args()
+    if not args.load_path:
+        raise argparse.ArgumentError('Missing required argument --load_path')
+
+    return args
+
+
 def add_common_args(parser):
     parser.add_argument('--train_record_file',
                         type=str,

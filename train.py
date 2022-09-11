@@ -4,7 +4,6 @@ import random
 import json
 from tqdm import tqdm
 from ujson import load as json_load
-import sys
 
 import torch
 import torch.nn as nn
